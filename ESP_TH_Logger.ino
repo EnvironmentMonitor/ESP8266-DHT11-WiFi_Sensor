@@ -2,10 +2,10 @@ Enter file contents here/*---------------------------------------------------
 HTTP 1.1 Temperature & Humidity Webserver for ESP8266 
 for ESP8266 adapted Arduino IDE
 
-by Stefan Thesen 05/2015 - free for anyone
+Created by Stefan Thesen, adapted by Environment Monitor
 
-Connect DHT21 / AMS2301 at GPIO2
----------------------------------------------------*/
+Connect DHT11 at GPIO2 with the Pullup resistor.....
+-------------------------------------------------------------------------*/
 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
