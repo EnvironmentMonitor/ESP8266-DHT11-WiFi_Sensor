@@ -1,5 +1,6 @@
-# Wireless Humidity and Temperature Monitor
-# ESP8266 with a DHT11 Temperature and Humidity Sensor
+# Wireless Humidity and Temperature Monitor usin ARDUINO IDE
+
+ESP8266 with a DHT11 Temperature and Humidity Sensor
 
 
 Wireless Temperature and Humidity Logger 
