@@ -12,3 +12,9 @@ Time stamp from NTP for each sample -- Set for GMT
 
 List of values provided as Graph or Table
 
+
+For the Arduino IDE Support Files see.....
+
+https://github.com/esp8266/Arduino
+
+
