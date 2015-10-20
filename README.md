@@ -3,6 +3,9 @@
 
 ESP8266 with a DHT11 Temperature and Humidity Sensor
 
+This has added functionality of the Esspresif SDK in the form of 
+Flash Configuration Information etc. See the ESP07-DHT-BMP-1602LCD.ino
+
 
 Wireless Temperature and Humidity Logger 
 
