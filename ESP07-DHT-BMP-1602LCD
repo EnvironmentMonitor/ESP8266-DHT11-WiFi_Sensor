@@ -1,0 +1,934 @@
+/*---------------------------------------------------
+                 _____
+                </\|/\>
+          _-_-_-_ *|* _-_-_-_
+         -_-_-_-_-\@/-_-_-_-_-
+         
+HTTP 1.1 Temperature & Humidity Webserver for ESP8266 
+for ESP8266 adapted in the Arduino IDE
+
+Espressif SDK Functionality in the form of a dignostics page
+
+Server Layout
+
+http://ipaddress/diag                    SDK Functionality
+                /monitor                 Google Gauges
+                /graphic                 Google Line Chart
+                /table                   Datalog Table
+                /yfireset                Reset the WiFi Connection
+                /srestart                Reboot the system(ESP must be cold booted, this will fail directly after uploading a sketch)
+
+Credits to Stefan Thesen and The Guy's at .......http://www.ESP8266.com
+With the use of http://espressif.com/new-sdk-release
+
+The ESP8266 Arduino Reference http://arduino.esp8266.com/versions/1.6.5-1160-gef26c5f/doc/reference.html
+
+With this release and a 1MByte Flash with 512KB SPIFFS can hold 3328 records of 120 bytes long Approx. 390KB
+
+Set up an account at http://smtp2go.com
+Encrypt your Password & Username using https://www.base64encode.org/
+
+This evolution is the product of the Environment Monitor...... 
+environmental.monitor.log@gmail.com
+
+See a feed from 2 DHT11's on twitter at http://twitter.com/DDTMonitor
+
+This will read various sensors and send an Email at a time or Sensor Condition
+With the Data from the Sensors presented via Web Gauges, Graphs & Tables.....
+
+Setup = 2 * DHT11 + BMP180 and an ESP8266-07 with 1MB Flash
+
+There are various pins used to load boot code so if you change pins and it does not boot this is WHY!!
+
+I2C  GPios 4 & 5
+DHT  GPio  12 & 13
+
+
+__________________________________________________________________________________________________
+......Use 5v to 3v Level Shifters as 5V devices like PIR and HC-SR04 can damage your device.......
+--------------------------------------------------------------------------------------------------
+ ___/'¬_         /\
+{_-_ ^  \_______//
+     /           \
+     \ _  _____  /
+     || ||     |||
+     || ||     |||  
+---------------------------------------------------*/
+
+#include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+#include "time_ntp.h"
+#include "DHT.h"
+#include <Wire.h>
+#include <SFE_BMP180.h>
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x20 for a 16 chars and 2 line display
+SFE_BMP180 pressure;
+// WiFi connection
+const char* ssid = "WiFi-SSID";
+const char* password = "WiFi-Password";
+String toaddres = "RCPT To: <send-to-email-address@gmail.com>";// Where your Last 24Hr Log has to be emailed To.......Time set below....
+String frmaddrs = "MAIL From: <senders-email-address@gmail.com>";// Where your Log has to be emailed From.......
+String b64Usernm = "base64-encrypted-username";// B64 Encrypted smtp2go Username
+String b64Passwd = "base64-encrypted-password";// B64 Encrypted smtp2go Password
+double baseline; // baseline pressure
+// ntp timestamp
+unsigned long ulSecs2000_timer=0;
+int done=0;
+// storage for Measurements; keep some mem free; allocate remainder
+#define KEEP_MEM_FREE 12288
+#define MEAS_SPAN_H 24
+unsigned long ulMeasCount=0;    // values already measured
+unsigned long ulNoMeasValues=0; // size of array
+unsigned long ulMeasDelta_ms;   // distance to next meas time
+unsigned long ulNextMeas_ms;    // next meas time
+unsigned long *pulTime;         // array for time points of measurements
+float *pfTemp,*pfHum,*pfTemp1,*pfHum1,*pfVcC,*pfBMP,*pfBMPT;           // array for Environment/System measurements
+
+unsigned long ulReqcount;       // how often has a valid page been requested
+unsigned long ulReconncount;    // how often did we connect to WiFi
+
+// Create an instance of the server on Port 80-89 = Sensor 1 - 10
+WiFiServer server(80);
+WiFiClient client;
+char popyahoo[] = "smtpcorp.com";
+int port = 2525;
+
+#define DHTPIN 12
+#define DHTPIN1 13
+ADC_MODE(ADC_VCC);
+// Uncomment whatever type you're using!
+#define DHTTYPE DHT11   // DHT 11 
+//#define DHTTYPE DHT22   // DHT 22  (AM2302)
+//#define DHTTYPE DHT21   // DHT 21 (AM2301)
+// init DHT11; 3rd parameter = 12 works for ESP8266@80MHz
+DHT dht(DHTPIN, DHTTYPE,12); 
+DHT dht1(DHTPIN1, DHTTYPE,12); 
+
+extern "C" 
+{
+#include "user_interface.h"
+}
+
+void wsysreset()
+{
+    ESP.restart();
+}
+
+void setup() 
+{
+  dht.begin();
+  dht1.begin();
+  // setup globals
+  ulReqcount=0; 
+  ulReconncount=0;
+  pinMode(15, INPUT);
+  lcd.init();                      // initialize the lcd 
+  lcd.backlight();
+  // start serial
+  Serial.begin(9600);
+       if (pressure.begin())
+       {
+       }
+       else
+  {
+    Serial.println("BMP180 init fail (disconnected?)\n\n");
+    while(1); // Pause forever.
+  }
+   baseline = getPressure();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("DHT Sensor Init ");   
+  // inital connect
+  WiFi.mode(WIFI_STA);
+  WiFiStart();
+    server.begin();
+  // allocate ram for data storage
+  uint32_t free=system_get_free_heap_size() - KEEP_MEM_FREE;
+  ulNoMeasValues = free / (sizeof(float)*7+sizeof(unsigned long));  // humidity & temp --> 4 + BMP Pressure & Temp --> 2 + time
+  pulTime = new unsigned long[ulNoMeasValues];
+  pfTemp = new float[ulNoMeasValues];
+  pfHum = new float[ulNoMeasValues];
+  pfTemp1 = new float[ulNoMeasValues];
+  pfHum1 = new float[ulNoMeasValues];
+  pfVcC = new float[ulNoMeasValues];
+  pfBMPT = new float[ulNoMeasValues];  
+  pfBMP = new float[ulNoMeasValues];
+  
+  if (pulTime==NULL || pfTemp==NULL || pfHum==NULL || pfTemp1==NULL || pfHum1==NULL || pfVcC==NULL || pfBMP==NULL || pfBMP==NULL)
+  {
+    ulNoMeasValues=0;
+    Serial.println("Error in memory allocation!");
+        lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Error in memory"); 
+  }
+  else
+  {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Set storage for "); 
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("Data Points ");
+  lcd.print(ulNoMeasValues); 
+    float fMeasDelta_sec = MEAS_SPAN_H*3750./ulNoMeasValues;
+    ulMeasDelta_ms = ( (unsigned long)(fMeasDelta_sec+0.5) ) * 1000;  // round to full sec
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Sample Every"); 
+  lcd.setCursor(0, 1);
+  lcd.print(ulMeasDelta_ms/1000);
+  lcd.print(" Seconds");
+    ulNextMeas_ms = millis()+ulMeasDelta_ms;
+  }
+}
+
+void WiFiStart()
+{
+  ulReconncount++;
+  
+  // Connect to WiFi network
+  Serial.println();
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  
+  WiFi.begin(ssid, password);
+  
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+  
+  // Start the server
+  server.begin();
+  Serial.println("Server started");
+                lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Network Started ");
+  // Print the IP address
+  Serial.println(WiFi.localIP());        
+  lcd.setCursor(0, 1);
+  lcd.print("IP= ");  
+  lcd.print(WiFi.localIP());
+  ///////////////////////////////
+  // connect to NTP and get time
+  ///////////////////////////////
+  ulSecs2000_timer=getNTPTimestamp();
+  Serial.print("Current Time GMT from NTP server: " );
+  Serial.println(epoch_to_string(ulSecs2000_timer).c_str());
+
+  ulSecs2000_timer -= millis()/1000;  // keep distance to millis() counter
+}
+
+
+double getPressure()
+{
+  char status;
+  double T,P,p0,a;
+  status = pressure.startTemperature();
+  if (status != 0)
+  {
+    delay(status);
+    status = pressure.getTemperature(T);
+    if (status != 0)
+    {
+      status = pressure.startPressure(3);
+      if (status != 0)
+      {
+        delay(status);
+        status = pressure.getPressure(P,T);
+        if (status != 0)
+        {
+          return(P);
+        }
+        else Serial.println("error retrieving pressure measurement\n");
+      }
+      else Serial.println("error starting pressure measurement\n");
+    }
+    else Serial.println("error retrieving temperature measurement\n");
+  }
+  else Serial.println("error starting temperature measurement\n");
+}
+
+unsigned long MakeTable (WiFiClient *pclient, bool bStream)
+{
+  unsigned long ulLength=0;
+  if (ulMeasCount==0) 
+  {
+    String sTable = "No data available yet.<BR>";
+    if (bStream)
+    {
+      pclient->print(sTable);
+    }
+    ulLength+=sTable.length();
+  }
+  else
+  { 
+    unsigned long ulEnd;
+    if (ulMeasCount>ulNoMeasValues)
+    {
+      ulEnd=ulMeasCount-ulNoMeasValues;
+    }
+    else
+    {
+      ulEnd=0;
+    }
+    
+    String sTable;
+    sTable = "<table style=\"width:100%\"><tr><th>Time / GMT</th><th>Int Temperature &deg;C</th><th>Int Humidity &#037;</th><th>Ext Temperature &deg;C</th><th>Ext Humidity &#037;</th><th>System Vcc</th><th>BMP Temp</th><th>Pressure MilliBar</th></tr>";
+    sTable += "<style>table, th, td {border: 2px solid black; border-collapse: collapse;} th, td {padding: 5px;} th {text-align: left;}</style>";
+    for (unsigned long li=ulMeasCount;li>ulEnd;li--)
+    {
+      unsigned long ulIndex=(li-1)%ulNoMeasValues;
+      sTable += "<tr><td>";
+      sTable += epoch_to_string(pulTime[ulIndex]).c_str();
+      sTable += "</td><td>";
+      sTable += pfTemp[ulIndex];
+      sTable += "</td><td>";
+      sTable += pfHum[ulIndex];
+      sTable += "</td><td>";
+      sTable += pfTemp1[ulIndex];
+      sTable += "</td><td>";
+      sTable += pfHum1[ulIndex];
+      sTable += "</td><td>";
+      sTable += (pfVcC[ulIndex]/1000);
+      sTable += "</td><td>";
+      sTable += pfBMPT[ulIndex];
+      sTable += "</td><td>";
+      sTable += pfBMP[ulIndex];       
+      sTable += "</td></tr>";
+      if(sTable.length()>1024)
+      {
+        if(bStream)
+        {
+          pclient->print(sTable);
+          //pclient->write(sTable.c_str(),sTable.length());
+        }
+        ulLength+=sTable.length();
+        sTable="";
+      }
+    }
+    sTable+="</table>";
+    ulLength+=sTable.length();
+    if(bStream)
+    {
+      pclient->print(sTable);
+    }   
+  }
+  
+  return(ulLength);
+}
+  
+unsigned long MakeList (WiFiClient *pclient, bool bStream)
+{
+  unsigned long ulLength=0;
+  if (ulMeasCount>0) 
+  { 
+    unsigned long ulBegin;
+    if (ulMeasCount>ulNoMeasValues)
+    {
+      ulBegin=ulMeasCount-ulNoMeasValues;
+    }
+    else
+    {
+      ulBegin=0;
+    }
+    
+    String sTable="";
+    for (unsigned long li=ulBegin;li<ulMeasCount;li++)
+    {
+      // result shall be ['18:24:08 - 21.5.2015',21.10,49.00],
+      unsigned long ulIndex=li%ulNoMeasValues;
+      sTable += "['";
+      sTable += epoch_to_string(pulTime[ulIndex]).c_str();
+      sTable += "',";
+      sTable += pfTemp[ulIndex];
+      sTable += ",";
+      sTable += pfHum[ulIndex];
+      sTable += ",";
+      sTable += pfTemp1[ulIndex];
+      sTable += ",";
+      sTable += pfHum1[ulIndex];
+      sTable += "],\n";
+
+      // play out in chunks of 1k
+      if(sTable.length()>1024)
+      {
+        if(bStream)
+        {
+          pclient->print(sTable);
+          //pclient->write(sTable.c_str(),sTable.length());
+        }
+        ulLength+=sTable.length();
+        sTable="";
+      }
+    }
+    
+    // remaining chunk
+    if(bStream)
+    {
+      pclient->print(sTable);
+      //pclient->write(sTable.c_str(),sTable.length());
+    } 
+    ulLength+=sTable.length();  
+  }
+  
+  return(ulLength);
+}
+
+String MakeHTTPHeader(unsigned long ulLength)
+{
+  String sHeader;
+  
+  sHeader  = F("HTTP/1.1 200 OK\r\nContent-Length: ");
+  sHeader += ulLength;
+  sHeader += F("\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n");
+  
+  return(sHeader);
+}
+
+String MakeHTTPFooter()
+{
+  String sResponse;
+  
+  sResponse  = F(" "); 
+/*  sResponse += ulReqcount;
+  sResponse += F(" - Restarted WiFi Connection Count = "); 
+  sResponse += ulReconncount;
+  sResponse += F(" - Free RAM = ");
+  sResponse += (uint32_t)system_get_free_heap_size();
+  sResponse += F(" - Max. Dataset Size = ");
+  sResponse += ulNoMeasValues;*/
+  sResponse += F("<BR>environmental.monitor.log@gmail.com<BR><FONT SIZE=-2>ESP8266-07 With DHT11 & BMP180 Sensors<BR><FONT SIZE=-2>Compiled Using ver. 1.6.5-1160-gef26c5f, built on Sep 30, 2015</body></html>");
+  return(sResponse);
+}
+
+String emailbutton = "off";
+String emailtime;
+
+void loop() 
+{
+    int button = 0;         // variable for reading the pushbutton status
+    button = digitalRead(15);  // read the state of the pushbutton on gpio 0
+  if (button == HIGH) {
+   emailbutton = "Send"; 
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("Email Button...."));
+  lcd.setCursor(0, 1);
+  lcd.print(F("......Pressed.!!"));
+  }
+  ///////////////////
+  // do data logging
+  ///////////////////
+  if (millis()>=ulNextMeas_ms) 
+  {
+    char status;
+    double T,a,P;
+    P = getPressure();
+    a = pressure.altitude(P,baseline);
+    pressure.getTemperature(T);
+      status = pressure.startTemperature();
+  if (status != 0)
+  {
+    delay(status);
+  }
+    status = pressure.getTemperature(T);
+    delay(100);
+    ulNextMeas_ms = millis()+ulMeasDelta_ms;
+    pfHum[ulMeasCount%ulNoMeasValues] = dht.readHumidity();
+    pfTemp[ulMeasCount%ulNoMeasValues] = dht.readTemperature();
+if (isnan(pfHum[ulMeasCount%ulNoMeasValues]) || isnan(pfTemp[ulMeasCount%ulNoMeasValues])) {
+  delay(4000);
+  pfHum[ulMeasCount%ulNoMeasValues] = dht.readHumidity();
+  pfTemp[ulMeasCount%ulNoMeasValues] = dht.readTemperature();
+  }
+    pfHum1[ulMeasCount%ulNoMeasValues] = dht1.readHumidity();
+    pfTemp1[ulMeasCount%ulNoMeasValues] = dht1.readTemperature();
+    pfVcC[ulMeasCount%ulNoMeasValues] =  ESP.getVcc();
+    pfBMPT[ulMeasCount%ulNoMeasValues] = T,2;
+    pfBMP[ulMeasCount%ulNoMeasValues] = P,1;    
+    pulTime[ulMeasCount%ulNoMeasValues] = millis()/1000+ulSecs2000_timer;
+    emailtime = epoch_to_string(pulTime[ulMeasCount%ulNoMeasValues]).c_str();   
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("T="));
+  lcd.print(pfTemp[ulMeasCount%ulNoMeasValues]);
+  lcd.setCursor(6, 0);
+  lcd.print(F("C RH="));
+  lcd.print(pfHum[ulMeasCount%ulNoMeasValues]);
+  lcd.setCursor(15, 0);
+  lcd.print(F("%"));
+  lcd.setCursor(0, 1);
+  lcd.print(F("Count="));
+  lcd.print(ulMeasCount+1);
+  lcd.setCursor(12, 1);
+  char tDigit = emailtime.charAt(1);  
+  if (isDigit(tDigit)) {lcd.setCursor(11, 1);}  // Check for ":" no leading 0
+  lcd.print(emailtime);  
+   if (emailtime.startsWith("7:1")){done=0;}
+       if (done==0) {
+  if (emailtime.startsWith("7:0") || emailbutton.startsWith("Sen")) {// Set the time for the Log to be emailed !! no leading 0.....!!
+      done=1;
+    Serial.println(F("Got match for email of data"));
+     if(sendEmail()) {
+     Serial.println(F("Email sent"));
+     lcd.clear();
+     lcd.print(F("mail sent......"));
+      } 
+      else {
+      Serial.println(F("Email failed"));
+      lcd.clear();
+      lcd.print(F("Email FAILED..!!!"));
+      }
+      
+  emailbutton = "off"; 
+  }
+ }
+
+  ulMeasCount++;
+  }
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    WiFiStart();
+  }
+  WiFiClient client = server.available();
+  if (!client) 
+  {
+    return;
+  }
+  
+  // Wait until the client sends some data
+  Serial.println(F("new client"));
+  unsigned long ultimeout = millis()+250;
+  while(!client.available() && (millis()<ultimeout) )
+  {
+    delay(1);
+  }
+  if(millis()>ultimeout) 
+  { 
+    Serial.println(F("client connection time-out!"));
+    return; 
+  }
+  String sRequest = client.readStringUntil('\r');
+  client.flush();
+  if(sRequest=="")
+  {
+    Serial.println(F("empty request! - stopping client"));
+    client.stop();
+    return;
+  }
+  
+  // get path; end of path is either space or ?
+  // Syntax is e.g. GET /?show=1234 HTTP/1.1
+  String sPath="",sParam="", sCmd="";
+  String sGetstart="GET ";
+  int iStart,iEndSpace,iEndQuest;
+  iStart = sRequest.indexOf(sGetstart);
+  if (iStart>=0)
+  {
+    iStart+=+sGetstart.length();
+    iEndSpace = sRequest.indexOf(" ",iStart);
+    iEndQuest = sRequest.indexOf("?",iStart);
+    
+    // are there parameters?
+    if(iEndSpace>0)
+    {
+      if(iEndQuest>0)
+      {
+        // there are parameters
+        sPath  = sRequest.substring(iStart,iEndQuest);
+        sParam = sRequest.substring(iEndQuest,iEndSpace);
+      }
+      else
+      {
+        // NO parameters
+        sPath  = sRequest.substring(iStart,iEndSpace);
+      }
+    }
+  }
+  String sResponse,sResponse2,sHeader;
+  if(sPath=="/monitor") 
+  {
+    ulReqcount++;
+    int iIndex= (ulMeasCount-1)%ulNoMeasValues;
+    sResponse  = F("<html>\n<head>\n<title>Environment Monitor</title>\n<script type=\"text/javascript\" src=\"https://www.google.com/jsapi?autoload={'modules':[{'name':'visualization','version':'1','packages':['gauge']}]}\"></script>\n<script type=\"text/javascript\">\nvar temp=");
+    sResponse += pfTemp[iIndex];
+    sResponse += F(",hum=");
+    sResponse += pfHum[iIndex];
+    sResponse += F(",temp1=");
+    sResponse += pfTemp1[iIndex];
+    sResponse += F(",hum1=");
+    sResponse += pfHum1[iIndex];    
+    sResponse += F(";\ngoogle.load('visualization', '1', {packages: ['gauge']});google.setOnLoadCallback(drawgaugetemp);google.setOnLoadCallback(drawgaugehum);google.setOnLoadCallback(drawgaugetemp1);google.setOnLoadCallback(drawgaugehum1);\nvar gaugetempOptions = {min: -10, max: 40, yellowFrom: -10, yellowTo: 16,redFrom: 28, redTo: 40, minorTicks: 10, majorTicks: ['-10','0','10','20','30','40']};\n");
+    sResponse += F("var gaugehumOptions = {min: 0, max: 100, yellowFrom: 0, yellowTo: 25, redFrom: 70, redTo: 100, minorTicks: 10, majorTicks: ['0','10','20','30','40','50','60','70','80','90','100']};\nvar gaugehum1Options = {min: 0, max: 100, yellowFrom: 0, yellowTo: 25, redFrom: 70, redTo: 100, minorTicks: 10, majorTicks: ['0','10','20','30','40','50','60','70','80','90','100']};\n");
+    sResponse += F("var gaugetemp1Options = {min: -10, max: 40, yellowFrom: -10, yellowTo: 16,redFrom: 28, redTo: 40, minorTicks: 10, majorTicks: ['-10','0','10','20','30','40']};\nvar gaugetemp,gaugehum,gaugetemp1,gaugehum1;\nfunction drawgaugetemp() {\ngaugetempData = new google.visualization.DataTable();\n");  
+    sResponse += F("gaugetempData.addColumn('number', 'Int \260C');\ngaugetempData.addRows(1);\ngaugetempData.setCell(0, 0, temp);\ngaugetemp = new google.visualization.Gauge(document.getElementById('gaugetemp_div'));\ngaugetemp.draw(gaugetempData, gaugetempOptions);\n}\n\n");
+    sResponse += F("function drawgaugehum() {\ngaugehumData = new google.visualization.DataTable();\ngaugehumData.addColumn('number', 'Int %');\ngaugehumData.addRows(1);\ngaugehumData.setCell(0, 0, hum);\ngaugehum = new google.visualization.Gauge(document.getElementById('gaugehum_div'));\ngaugehum.draw(gaugehumData, gaugehumOptions);\n}\n");
+    sResponse += F("\n\nfunction drawgaugetemp1() {\ngaugetemp1Data = new google.visualization.DataTable();\n");
+    sResponse += F("gaugetemp1Data.addColumn('number', 'Ext \260C');\ngaugetemp1Data.addRows(1);\ngaugetemp1Data.setCell(0, 0, temp1);\ngaugetemp1 = new google.visualization.Gauge(document.getElementById('gaugetemp1_div'));\ngaugetemp1.draw(gaugetemp1Data, gaugetemp1Options);\n}\n\n");
+    sResponse += F("function drawgaugehum1() {\ngaugehum1Data = new google.visualization.DataTable();\ngaugehum1Data.addColumn('number', 'Ext %');\ngaugehum1Data.addRows(1);\ngaugehum1Data.setCell(0, 0, hum1);\ngaugehum1 = new google.visualization.Gauge(document.getElementById('gaugehum1_div'));\ngaugehum1.draw(gaugehum1Data, gaugehum1Options);\n}\n");
+    sResponse += F("</script>\n</head>\n<body>\n<font color=\"#000000\"><body bgcolor=\"#d0d0f0\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\"><h1>Environment Monitor</h1><BR><BR><FONT SIZE=+1>Last Sample Taken ");
+    sResponse += epoch_to_string(pulTime[iIndex]).c_str();
+
+    
+    sResponse2 = F("GMT<BR>\n<div id=\"gaugetemp_div\" style=\"float:left; width:200px; height: 200px;\"></div> \n<div id=\"gaugehum_div\" style=\"float:left; width:200px; height: 200px;\"></div>\n<div style=\"clear:both;\"></div>\n<div id=\"gaugetemp1_div\" style=\"float:left; width:200px; height: 200px;\"></div> \n<div id=\"gaugehum1_div\" style=\"float:left; width:200px; height: 200px;\">");
+    sResponse2 += F("</div>\n<div style=\"clear:both;\"></div><p>Environment Display<BR><a href=\"/graphic\">Sensor Graph Page</a><BR><a href=\"/table\">Sensor Datalog Page</a><BR><a href=\"/diag\">Diagnostics Page</a></p>");
+    sResponse2 += MakeHTTPFooter().c_str();
+    
+    // Send the response to the client 
+    client.print(MakeHTTPHeader(sResponse.length()+sResponse2.length()).c_str());
+    client.print(sResponse);
+    client.print(sResponse2);
+  }
+  else if(sPath=="/table")
+  {
+    ulReqcount++;
+    unsigned long ulSizeList = MakeTable(&client,false); // get size of table first
+    
+    sResponse  = F("<html><head><title>Environment Monitor</title></head><body>");
+    sResponse += F("<font color=\"#000000\"><body bgcolor=\"#d0d0f0\">");
+    sResponse += F("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\">");
+    sResponse += F("<h1>Environment Monitor</h1>");
+    sResponse += F("<FONT SIZE=+1>");
+    sResponse += F("<BR><a href=\"/monitor\">Sensor Gauges Page</a><BR><a href=\"/graphic\">Sensor Graph Page</a><BR><a href=\"/diag\">Diagnostics Page</a><BR><BR>Sample Interval ");
+    sResponse += ulMeasDelta_ms/1000;
+    sResponse += F(" Seconds<BR>");
+    // here the big table will follow later - but let us prepare the end first
+      
+    // part 2 of response - after the big table
+    sResponse2 = MakeHTTPFooter().c_str();
+    
+    // Send the response to the client - delete strings after use to keep mem low
+    client.print(MakeHTTPHeader(sResponse.length()+sResponse2.length()+ulSizeList).c_str()); 
+    client.print(sResponse); sResponse="";
+    MakeTable(&client,true);
+    client.print(sResponse2);
+  }
+  else if(sPath=="/graphic")
+  {
+    ulReqcount++;
+    unsigned long ulSizeList = MakeList(&client,false); // get size of list first
+
+    sResponse  = F("<html>\n<head>\n<title>Environment Monitor</title>\n<script type=\"text/javascript\" src=\"https://www.google.com/jsapi?autoload={'modules':[{'name':'visualization','version':'1','packages':['corechart']}]}\"></script>\n");
+    sResponse += F("<script type=\"text/javascript\"> google.setOnLoadCallback(drawChart);\nfunction drawChart() {var data = google.visualization.arrayToDataTable([\n['Time / GMT', 'InTmp', 'InHum', 'ExTmp', 'ExHum'],\n");    
+    // here the big list will follow later - but let us prepare the end first
+      
+    // part 2 of response - after the big list
+    sResponse2  = F("]);\nvar options = {title: 'Environment',vAxes:{0:{viewWindowMode:'explicit',gridlines:{color:'black'},format:\"##.##\260C\"},1: {gridlines:{color:'transparent'},format:\"##,##%\"},},series:{0:{targetAxisIndex:0},1:{targetAxisIndex:1},2:{targetAxisIndex:0},3:{targetAxisIndex:1},},curveType:'function',legend:{ position: 'bottom'}};");
+    sResponse2 += F("var chart = new google.visualization.LineChart(document.getElementById('curve_chart'));chart.draw(data, options);}\n</script>\n</head>\n");
+    sResponse2 += F("<body>\n<font color=\"#000000\"><body bgcolor=\"#d0d0f0\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\"><h1>Environment Monitor</h1><BR><a href=\"/monitor\">Sensor Gauges Page</a><BR><a href=\"/table\">Sensor Datalog Page</a><BR><a href=\"/diag\">Diagnostics Page</a><BR>");
+    sResponse2 += F("<BR>\n<div id=\"curve_chart\" style=\"width: 600px; height: 400px\"></div>");
+    sResponse2 += MakeHTTPFooter().c_str();
+    
+    // Send the response to the client - delete strings after use to keep mem low
+    client.print(MakeHTTPHeader(sResponse.length()+sResponse2.length()+ulSizeList).c_str()); 
+    client.print(sResponse); sResponse="";
+    MakeList(&client,true);
+    client.print(sResponse2);
+  } 
+  else if(sPath=="/yfireset")
+  {
+                                client.println("HTTP/1.1 200 OK"); 
+                                client.println("Content-Type: text/html");
+                                client.println("Connection: close");
+                                client.println();
+                                client.println("<!DOCTYPE HTML>");
+                                client.print("<html><head><title>Environment Monitor</title></head><body>");
+                                client.print("<font color=\"#000000\"><body bgcolor=\"#d0d0f0\">");
+                                client.print("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\">");
+                                client.print("<h1>Environment Monitor<BR>WiFi Reset Page </h1>");
+                                client.print("<BR><a href=\"/monitor\">Sensor Gauges Page</a><BR><a href=\"/graphic\">Sensor Graph Page</a><BR><a href=\"/table\">Sensor Datalog Page</a><BR><a href=\"/diag\">Diagnostics Page</a><BR><BR><BR>Restarted WiFiConnections = ");
+                                client.print(ulReconncount);
+                                client.print("<BR><FONT SIZE=-2>environmental.monitor.log@gmail.com<BR><FONT SIZE=-2>ESP8266-07 With DS18B20, DHT11 & BMP180 Sensors<BR>");
+                                client.print("<FONT SIZE=-2>Compiled Using ver. 1.6.5-1160-gef26c5f, built on Sep 30, 2015<BR>");
+                                client.println("<IMG SRC=\"https://raw.githubusercontent.com/genguskahn/ESP8266-For-DUMMIES/master/SoC/DimmerDocs/organicw.gif\" WIDTH=\"250\" HEIGHT=\"151\" BORDER=\"1\"></body></html>");
+
+  WiFiStart();
+  }
+  else if(sPath=="/diag")
+  {
+     float   servolt1 = ESP.getVcc();
+     long int spdcount = ESP.getCycleCount();
+     delay(1);
+     long int spdcount1 = ESP.getCycleCount();
+     long int speedcnt = spdcount1-spdcount; 
+     FlashMode_t ideMode = ESP.getFlashChipMode();
+     ulReqcount++;
+                                client.println("HTTP/1.1 200 OK"); 
+                                client.println("Content-Type: text/html");
+                                client.println("Connection: close");
+                                client.println();
+                                client.println("<!DOCTYPE HTML>");
+                                client.print("<html><head><title>Environment Monitor</title></head><body>");
+                                client.print("<font color=\"#000000\"><body bgcolor=\"#d0d0f0\">");
+                                client.print("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\">");
+                                client.print("<h1>Environment Monitor<BR>SDK Diagnostic Information</h1>");
+                                client.print("<BR><a href=\"/monitor\">Sensor Gauges Page</a><BR><a href=\"/graphic\">Sensor Graph Page</a><BR><a href=\"/table\">Sensor Datalog Page</a><BR><BR>Restarted WiFiConnections = ");
+                                client.print(ulReconncount);
+                                client.print("<BR>  Web Page Requests = ");
+                                client.print(ulReqcount);
+                                client.print("<BR>  WiFi Station Hostname = ");
+                                client.print(wifi_station_get_hostname());
+                                client.print("<BR>  Free RAM = ");
+                                client.print((uint32_t)system_get_free_heap_size());
+                                client.print("<BR>  Logged Sample Count = ");
+                                client.print(ulMeasCount);
+                                client.print("<BR>  Total Sample points in 24 Hours = ");
+                                client.print(ulNoMeasValues);                                 
+                                client.print("<BR>  Average Sample Logging Interval = ");
+                                client.print((ulMeasDelta_ms/1000+0.5)/60,0);
+                                client.print(" Minutes<BR>  SDK Version = ");
+                                client.print(ESP.getSdkVersion());
+                                client.print("<BR>  Boot Version = ");
+                                client.print(ESP.getBootVersion());
+                                client.print("<BR>");
+                                client.print("  Free Sketch Space  = ");
+                                client.print(ESP.getFreeSketchSpace()/1024);
+                                client.print("KB<BR>  Sketch Size  = ");
+                                client.print(ESP.getSketchSize()/1024);
+                                client.print("KB<BR>");
+                                client.printf("  Flash Chip id = %08X\n", ESP.getFlashChipId());
+                                client.print("<BR>");
+                                client.printf("  Flash Chip Mode = %s\n", (ideMode == FM_QIO ? "QIO" : ideMode == FM_QOUT ? "QOUT" : ideMode == FM_DIO ? "DIO" : ideMode == FM_DOUT ? "DOUT" : "UNKNOWN"));
+                                client.print("<BR>  Flash Size By ID = ");
+                                client.print(ESP.getFlashChipRealSize()/1024);
+                                client.print(" KBytes<BR>  Flash Size (IDE) = "); 
+                                client.print(ESP.getFlashChipSize()/1024);
+                                client.print(" KBytes<BR>  Flash Speed = ");
+                                client.print(ESP.getFlashChipSpeed()/1000000);
+                                client.print("MHz<BR>  ESP8266 CPU Speed = ");
+                                client.print(ESP.getCpuFreqMHz());
+                                client.print("MHz<BR>");
+                                client.printf("  ESP8266 Chip id = %08X\n", ESP.getChipId());
+                                client.print("<BR>  System Instruction Cycles Per Second = ");
+                                client.print(speedcnt*1000);  
+                                client.print("<BR>  Last System Restart Time = ");
+                                client.print(epoch_to_string(ulSecs2000_timer).c_str());
+                                client.print("<BR>  Last System Restart Reason = ");
+                                client.print(ESP.getResetInfo());
+                                client.print("<BR>  System Time = ");
+                                client.print(emailtime);                                
+                                client.print(" (Last Recorded Sample Time)<BR>  System VCC = ");
+                                client.print(servolt1/1000, 3);
+                                client.print("V <BR>  Datalog File Size in Bytes = N/A ");
+                                client.print("<BR><FONT SIZE=-2>environmental.monitor.log@gmail.com<BR><FONT SIZE=-2>ESP8266-07 With DS18B20, DHT11 & BMP180 Sensors<BR>");
+                                client.print("<FONT SIZE=-2>Compiled Using ver. 1.6.5-1160-gef26c5f, built on Sep 30, 2015<BR>");
+                                client.println("<IMG SRC=\"https://raw.githubusercontent.com/genguskahn/ESP8266-For-DUMMIES/master/SoC/DimmerDocs/organicw.gif\" WIDTH=\"250\" HEIGHT=\"151\" BORDER=\"1\"></body></html>");
+  }
+   else if(sPath=="/srestart")
+  {
+                                client.println("HTTP/1.1 200 OK"); 
+                                client.println("Content-Type: text/html");
+                                client.println("Connection: close");
+                                client.println();
+                                client.println("<!DOCTYPE HTML>");
+                                client.print("<html><head><title>Environment Monitor</title></head><body>");
+                                client.print("<font color=\"#000000\"><body bgcolor=\"#d0d0f0\">");
+                                client.print("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=yes\">");
+                                client.print("<h1>Environment Monitor<BR>Please wait 10 Seconds......<BR><FONT SIZE=+2>System Reset Page !!!! </h1>");
+                                client.print("<BR><a href=\"/monitor\">Sensor Gauges Page</a><BR><a href=\"/graphic\">Sensor Graph Page</a><BR><a href=\"/table\">Sensor Datalog Page</a><BR><a href=\"/diag\">Diagnostics Page</a><BR><BR><BR>Restarted WiFiConnections = ");
+                                client.print(ulReconncount);
+                                client.print("<BR><BR><BR><FONT SIZE=-2>environmental.monitor.log@gmail.com<BR><FONT SIZE=-2>ESP8266-07 With DS18B20, DHT11 & BMP180 Sensors<BR>");
+                                client.print("<FONT SIZE=-2>Compiled Using ver. 1.6.5-1160-gef26c5f, built on Sep 30, 2015<BR>");
+                                client.println("<IMG SRC=\"https://raw.githubusercontent.com/genguskahn/ESP8266-For-DUMMIES/master/SoC/DimmerDocs/organicw.gif\" WIDTH=\"250\" HEIGHT=\"151\" BORDER=\"1\"></body></html>");
+client.stop();
+wsysreset();
+  }
+  else 
+  {
+    sResponse="<html><head><title>404 Not Found</title></head><body><h1>Not Found</h1><p>The requested URL was not found on this server, What did you sk for?.</p></body></html>";
+    
+    sHeader  = F("HTTP/1.1 404 Not found\r\nContent-Length: ");
+    sHeader += sResponse.length();
+    sHeader += F("\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n");
+    
+    // Send the response to the client
+    client.print(sHeader);
+    client.print(sResponse);
+  }
+  
+  // and stop the client
+  client.stop();
+  Serial.println(F("Client disconnected"));
+}
+
+byte sendEmail()
+{
+//  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(F("."));
+  }
+
+  Serial.println(F(""));
+  Serial.println(F("WiFi connected"));
+  Serial.println(F("IP address: "));
+  Serial.println(WiFi.localIP());
+
+  byte thisByte = 0;
+  byte respCode;
+
+  if(client.connect( popyahoo,port) == 1) {
+    Serial.println(F("connected smtp2go"));
+  } else {
+    Serial.println(F("connection failed smtp2go"));
+    return 0;
+  }
+  if(!eRcv()) {Serial.println("before ehlo");return 0 ;}
+
+  Serial.println(F("Sending ehlo"));
+  client.print("EHLO ");
+    client.println(WiFi.localIP());
+  if(!eRcv()) {Serial.println("ehlo");return 0 ;}
+
+  Serial.println(F("Sending auth login"));
+  client.println("auth login");
+  if(!eRcv()) {Serial.println("auth");return 0 ;}
+
+  Serial.println("Sending User");
+// Change to your base64 encoded user
+  client.println(b64Usernm);//
+  if(!eRcv()) {Serial.println("user");return 0 ;}
+
+  Serial.println(F("Sending Password"));
+// change to your base64 encoded password
+  client.println(b64Passwd);//
+
+  if(!eRcv()) {Serial.println("ehlo");return 0;}
+
+  Serial.println(F("Sending From"));
+  client.println(frmaddrs);
+  if(!eRcv()) {Serial.println("email");return 0 ;}
+
+
+  Serial.println(F("Sending To"));
+  client.println(toaddres);
+  if(!eRcv()) {Serial.println("email");return 0 ;}
+
+  Serial.println(F("Sending DATA"));
+  client.println("DATA");
+  if(!eRcv()) {Serial.println("email");return 0 ;}
+int ulEnd=0;
+if (ulMeasCount>ulNoMeasValues) {ulEnd=(ulMeasCount-ulNoMeasValues);}
+String sTable="";
+  Serial.println(F("Sending email"));
+  client.println("To: The Environment Monitor <environmental.monitor.log@gmail.com>");
+  client.println("From: Environment Monitor <ESP8266-07>");
+  client.println("Subject: ESP8266 Daily Environment Report\r\n");
+  client.println("This is Sent Directly from An ESP8266-07 Module With Approx. 500 Records per day");
+  client.print("The Total Number Of Environment Samples Values Being Tranferred Are -  ");
+  client.println((ulMeasCount-ulEnd)+1);
+    
+    for (unsigned long li=ulMeasCount;li>ulEnd;li--)
+    {
+      unsigned long ulIndex=(li-1)%ulNoMeasValues;
+      sTable += epoch_to_string(pulTime[ulIndex]).c_str();
+      sTable += " , ";
+      sTable += pfTemp[ulIndex];
+      sTable += " , ";
+      sTable += pfHum[ulIndex];
+      sTable += " , ";
+      sTable += pfTemp1[ulIndex];
+      sTable += " , ";
+      sTable += pfHum1[ulIndex];
+      sTable += " , ";
+      sTable += pfVcC[ulIndex];
+      sTable += " , ";
+      sTable += pfBMPT[ulIndex];
+      sTable += " , ";
+      sTable += pfBMP[ulIndex];      
+      client.println(sTable);
+      sTable="";
+    }
+
+  client.println(sTable);
+
+  client.println("End of Data");
+
+  client.println(".");
+
+  if(!eRcv()) {Serial.println("aftersending");return 0 ;}
+
+  Serial.println(F("Sending QUIT")); //Serial.println(F("Sending QUIT"));
+  client.println("QUIT");
+
+  if(!eRcv()) {Serial.println("afterQuit");return 0 ;}
+
+  client.stop();
+
+  Serial.println(F("disconnected"));
+  return 1;
+}
+
+byte eRcv()
+{
+  byte respCode;
+  byte thisByte;
+  int loopCount = 0;
+
+  while(!client.available()) {
+    delay(1);
+    loopCount++;
+
+    // if nothing received for 20 seconds, timeout
+    if(loopCount > 20000) {
+      client.stop();
+      Serial.println(F("20 sec \r\nTimeout"));
+      return 0;
+    }
+  }
+
+  respCode = client.peek();
+
+  while(client.available())
+  {
+    thisByte = client.read();
+    Serial.write(thisByte);
+  }
+
+  if(respCode >= '4')
+  {
+    efail();
+    return 0;
+  }
+
+  return 1;
+}
+
+
+void efail()
+{
+  byte thisByte = 0;
+  int loopCount = 0;
+
+  client.println(F("QUIT"));
+
+  while(!client.available()) {
+    delay(1);
+    loopCount++;
+
+    // if nothing received for 10 seconds, timeout
+    if(loopCount > 10000) {
+      client.stop();
+      Serial.println(F("efail \r\nTimeout"));
+      return;
+    }
+  }
+
+  while(client.available())
+  {
+    thisByte = client.read();
+    Serial.write(thisByte);
+  }
+
+  client.stop();
+
+  Serial.println(F("disconnected"));
+}
