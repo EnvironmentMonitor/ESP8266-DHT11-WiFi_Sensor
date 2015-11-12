@@ -11,9 +11,12 @@ Espressif SDK Functionality in the form of a dignostics page
 
 Server Layout
 
-http://ipaddress/diag                    SDK Functionality
+http://ipaddress/                        Web Text to LCD Input
+                /diag                    SDK Functionality
                 /monitor                 Google Gauges
                 /graphic                 Google Line Chart
+                /graphic2                Google Line Chart of BMP180 Pressure
+                /pressure                Google Gauge of BMP180 Pressure
                 /table                   Datalog Table
                 /yfireset                Reset the WiFi Connection
                 /srestart                Reboot the system(ESP must be cold booted, this will fail directly after uploading a sketch)
