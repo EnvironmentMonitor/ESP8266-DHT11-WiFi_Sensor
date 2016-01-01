@@ -1,7 +1,7 @@
  <html lang="en">
  <head>
    <meta charset="utf-8">
-   <title>The HTML Script will not execute on the Github Copy to local file for Full View</title>
+   <title>The HTML Script will not execute on the Github, Copy to local file for Full View</title>
  </head>
 <font color="#000000"><body bgcolor="#a0dFfe"><meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 	<h2>Environmental Sensor Readings</h2>
