@@ -6,7 +6,7 @@
 <font color="#000000"><body bgcolor="#a0dFfe"><meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 	<h2>Environmental Sensor Readings</h2>
 	<h2>Using an ESP8266 with 2 DHT11<BR>& 1 DS18B20 Environment Sensors<BR><BR> ♂♀♪♫☼►</h2>
-<BR><BR><a href="http://esp8266.com/">Find out how this is done Visit ESP8266.COM Support Forum</a><BR><BR><BR>
+<BR><BR><a href="http://esp8266.com/">Find out how this is done Visit ESP8266.COM Support Forum</a><BR><BR><a href="http://82.5.78.180:82/">The Full Page is displayed Here.....</a><BR><BR>
    <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.5/jquery.min.js"></script>
 
 <div style="float:left;">
