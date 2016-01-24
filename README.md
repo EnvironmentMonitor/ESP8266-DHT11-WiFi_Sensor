@@ -137,5 +137,7 @@ Thingspeak Data Visualisation via Matlab Chart
 <div style="float:none;"><iframe width="450" height="375" style="border: 1px solid #cccccc;" src="http://api.thingspeak.com/apps/matlab_visualizations/41029" ></iframe>
 
 <BR>environmental.monitor.log@gmail.com<BR><FONT SIZE=-2>ESP8266 With Various Sensors<BR><FONT SIZE=-2>Compiled Using ver. 2.0.0-rc2, built December, 2015<BR></div>
+<blockquote class="twitter-tweet" data-lang="en-gb"><p lang="en" dir="ltr">Fall Detected: 1 Heart Rate: 84 BPM IBI: 718 mS Body Temperature: 21C Attitude Angle: 40 via an <a href="https://twitter.com/hashtag/ESP8266?src=hash">#ESP8266</a></p>&mdash; MCU Automation (@MCUAutomation) <a href="https://twitter.com/MCUAutomation/status/691233600855904256">January 24, 2016</a></blockquote> <script async src="//platform.twitter.com/widgets.js" charset="utf-8"></script>
+
 </body>
 </html>
